@@ -34,17 +34,17 @@ BottleScanner 是一个基于 HALCON 的瓶盖检测演示项目，提供 C++ �
 
 ## 展示图片
 
-### 1) GUI 检测与日志面板
-![GUI 检测与日志面板](docs/showcase/01-ui-log.png)
+### 1) HALCON HDevelop 调试界面（彩色原图）
+![HALCON HDevelop 调试界面（彩色原图）](docs/showcase/01-ui-log.png)
 
-### 2) 数据集示例 A
-![数据集示例 A](docs/showcase/02-dataset-db.png)
+### 2) HALCON HDevelop 调试界面（灰度中间结果）
+![HALCON HDevelop 调试界面（灰度中间结果）](docs/showcase/02-dataset-db.png)
 
-### 3) 数据集示例 B
-![数据集示例 B](docs/showcase/03-dataset-csuu.png)
+### 3) WinForms 检测界面（场景 A）
+![WinForms 检测界面（场景 A）](docs/showcase/03-dataset-csuu.png)
 
-### 4) 数据集示例 C
-![数据集示例 C](docs/showcase/04-dataset-7jxr.png)
+### 4) WinForms 检测界面（场景 B）
+![WinForms 检测界面（场景 B）](docs/showcase/04-dataset-7jxr.png)
 
 ## 日志输出格式
 
