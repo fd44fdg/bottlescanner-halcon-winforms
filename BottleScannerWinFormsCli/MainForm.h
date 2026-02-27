@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <msclr/marshal.h>
 #include <msclr/marshal_cppstd.h>
 #include <stdexcept>
 #using <System.dll>
@@ -14,6 +15,7 @@ namespace BottleScannerWinFormsCli
 using namespace System;
 using namespace System::Drawing;
 using namespace System::Windows::Forms;
+using namespace System::Threading::Tasks;
 
 struct NativeRuntime
 {
@@ -91,6 +93,16 @@ private:
   TrackBar^ track_min_circularity_;
   Button^ button_open_report_dir_;
   OpenFileDialog^ open_file_dialog_;
+  Timer^ inspection_poll_timer_;
+  Task<IntPtr>^ inspection_task_;
+  bool detection_in_progress_ = false;
+  bool inspection_timeout_notified_ = false;
+  DateTime inspection_deadline_;
+  String^ pending_image_path_;
+  literal int kInspectionTimeoutMs = 12000;
+  literal int kGateMinCount = 1;
+  literal int kGateMaxCount = 1000;
+  literal String^ kAlgoVersion = "BottleScanner-1.2";
 
   void BuildUi()
   {
@@ -332,6 +344,10 @@ private:
     open_file_dialog_->Filter =
         "Image Files|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff|All Files|*.*";
 
+    inspection_poll_timer_ = gcnew Timer();
+    inspection_poll_timer_->Interval = 100;
+    inspection_poll_timer_->Tick += gcnew EventHandler(this, &MainForm::OnInspectionPollTick);
+
     Load += gcnew EventHandler(this, &MainForm::OnFormLoad);
     Shown += gcnew EventHandler(this, &MainForm::OnFormShown);
     SizeChanged += gcnew EventHandler(this, &MainForm::OnFormSizeChanged);
@@ -378,9 +394,11 @@ private:
 
   void OnDetectClicked(Object^, EventArgs^)
   {
-    label_result_->Text = "结果：正在检测...";
-    label_result_->Refresh();
-    Application::DoEvents();
+    if (detection_in_progress_)
+    {
+      MessageBox::Show("检测正在进行中，请等待完成。", "提示", MessageBoxButtons::OK, MessageBoxIcon::Information);
+      return;
+    }
 
     String^ path_managed = textbox_path_->Text->Trim();
     if (String::IsNullOrWhiteSpace(path_managed))
@@ -405,70 +423,30 @@ private:
         return;
       }
 
-      const std::string image_path = msclr::interop::marshal_as<std::string>(path_managed);
-      const BottleScanner::InspectionResult result = native_->scanner.DoInspection(image_path);
-      if (!result.success)
-      {
-        label_result_->Text = String::Format("结果：检测失败\n耗时：{0} ms\n错误：{1}",
-                                             result.elapsed_ms,
-                                             gcnew String(result.error_message.c_str()));
-        return;
-      }
+      pending_image_path_ = path_managed;
+      detection_in_progress_ = true;
+      inspection_timeout_notified_ = false;
+      inspection_deadline_ = DateTime::Now.AddMilliseconds(kInspectionTimeoutMs);
+      button_detect_->Enabled = false;
+      button_browse_->Enabled = false;
+      label_result_->Text = "结果：正在检测...";
 
-      HalconCpp::HObject display_obj;
-      HalconCpp::GenEmptyObj(&display_obj);
-      HalconCpp::HTuple hv_display_raw_count;
-      HalconCpp::CountObj(result.regions, &hv_display_raw_count);
-      for (int i = 1; i <= static_cast<int>(hv_display_raw_count.I()); ++i)
-      {
-        HalconCpp::HObject one_region;
-        HalconCpp::HTuple area;
-        HalconCpp::HTuple row;
-        HalconCpp::HTuple col;
-        HalconCpp::SelectObj(result.regions, &one_region, i);
-        HalconCpp::AreaCenter(one_region, &area, &row, &col);
-        if (area.Length() > 0 && area[0].D() > 0.0)
-        {
-          HalconCpp::ConcatObj(display_obj, one_region, &display_obj);
-        }
-      }
-
-      HalconCpp::HTuple final_count;
-      HalconCpp::CountObj(display_obj, &final_count);
-
-      HalconCpp::HTuple hv_w;
-      HalconCpp::HTuple hv_h;
-      HalconCpp::GetImageSize(result.image, &hv_w, &hv_h);
-      HalconCpp::SetPart(native_->window_handle, 0, 0, hv_h - 1, hv_w - 1);
-      HalconCpp::ClearWindow(native_->window_handle);
-      HalconCpp::DispObj(result.image, native_->window_handle);
-      HalconCpp::SetColor(native_->window_handle, "green");
-      HalconCpp::SetLineWidth(native_->window_handle, 2);
-      HalconCpp::SetDraw(native_->window_handle, "margin");
-      HalconCpp::DispObj(display_obj, native_->window_handle);
-
-      label_result_->Text =
-          String::Format("结果：识别到 {0} 个蓝色瓶盖\n耗时：{1} ms\nH:[{2},{3}] S>= {4} V>= {5}\nArea>= {6} Circ>= {7:F2}",
-                         static_cast<int>(final_count.I()),
-                         result.elapsed_ms,
-                         track_h_low_->Value,
-                         track_h_high_->Value,
-                         track_s_low_->Value,
-                         track_v_low_->Value,
-                         track_min_area_->Value,
-                         track_min_circularity_->Value / 100.0);
-
-      AppendDetectionLog(static_cast<int>(final_count.I()),
-                         result.elapsed_ms,
-                         result.adaptive_s_low_threshold);
+      inspection_task_ = Task<IntPtr>::Factory->StartNew(gcnew Func<IntPtr>(this, &MainForm::RunInspectionWorker));
+      inspection_poll_timer_->Start();
     }
     catch (System::Exception^ ex)
     {
+      detection_in_progress_ = false;
+      button_detect_->Enabled = true;
+      button_browse_->Enabled = true;
       label_result_->Text = "结果：.NET 异常";
       MessageBox::Show(ex->Message, ".NET 异常", MessageBoxButtons::OK, MessageBoxIcon::Error);
     }
     catch (const HalconCpp::HException& ex)
     {
+      detection_in_progress_ = false;
+      button_detect_->Enabled = true;
+      button_browse_->Enabled = true;
       label_result_->Text = "结果：HALCON 异常";
       MessageBox::Show(gcnew String(ex.ErrorMessage().Text()),
                        "HALCON 异常",
@@ -477,6 +455,9 @@ private:
     }
     catch (const std::exception& ex)
     {
+      detection_in_progress_ = false;
+      button_detect_->Enabled = true;
+      button_browse_->Enabled = true;
       label_result_->Text = "结果：标准异常";
       MessageBox::Show(gcnew String(ex.what()),
                        "标准异常",
@@ -485,8 +466,153 @@ private:
     }
     catch (...)
     {
+      detection_in_progress_ = false;
+      button_detect_->Enabled = true;
+      button_browse_->Enabled = true;
       MessageBox::Show("未知异常", "错误", MessageBoxButtons::OK, MessageBoxIcon::Error);
     }
+  }
+
+  IntPtr RunInspectionWorker()
+  {
+    BottleScanner::InspectionResult* native_result = new BottleScanner::InspectionResult();
+    try
+    {
+      msclr::interop::marshal_context ctx;
+      String^ managed_path = pending_image_path_ == nullptr ? String::Empty : pending_image_path_;
+      const std::string image_path = ctx.marshal_as<std::string>(managed_path);
+      *native_result = native_->scanner.DoInspection(image_path);
+    }
+    catch (const std::exception& ex)
+    {
+      native_result->success = false;
+      native_result->error_message = ex.what();
+    }
+    catch (...)
+    {
+      native_result->success = false;
+      native_result->error_message = "Unknown worker exception";
+    }
+    return IntPtr(native_result);
+  }
+
+  void OnInspectionPollTick(Object^, EventArgs^)
+  {
+    if (inspection_task_ == nullptr) return;
+
+    if (!inspection_task_->IsCompleted)
+    {
+      if (!inspection_timeout_notified_ && DateTime::Now > inspection_deadline_)
+      {
+        inspection_timeout_notified_ = true;
+        label_result_->Text = "结果：检测超时，等待任务安全结束...";
+      }
+      return;
+    }
+
+    inspection_poll_timer_->Stop();
+
+    BottleScanner::InspectionResult* native_result = nullptr;
+    try
+    {
+      IntPtr ptr = inspection_task_->Result;
+      native_result = static_cast<BottleScanner::InspectionResult*>(ptr.ToPointer());
+      if (native_result == nullptr)
+      {
+        label_result_->Text = "结果：检测失败（空结果）";
+      }
+      else
+      {
+        HandleInspectionResult(*native_result);
+      }
+    }
+    catch (System::Exception^ ex)
+    {
+      label_result_->Text = "结果：任务异常";
+      MessageBox::Show(ex->Message, "任务异常", MessageBoxButtons::OK, MessageBoxIcon::Error);
+    }
+
+    if (native_result != nullptr)
+    {
+      delete native_result;
+    }
+
+    inspection_task_ = nullptr;
+    pending_image_path_ = nullptr;
+    detection_in_progress_ = false;
+    button_detect_->Enabled = true;
+    button_browse_->Enabled = true;
+  }
+
+  void HandleInspectionResult(const BottleScanner::InspectionResult& result)
+  {
+    if (!result.success)
+    {
+      label_result_->Text = String::Format("结果：检测失败\n耗时：{0} ms\n错误：{1}",
+                                           result.elapsed_ms,
+                                           gcnew String(result.error_message.c_str()));
+      AppendDetectionLog(textbox_path_->Text->Trim(),
+                         -1,
+                         result.elapsed_ms,
+                         result.adaptive_s_low_threshold,
+                         "DETECT_FAIL",
+                         false);
+      return;
+    }
+
+    HalconCpp::HObject display_obj;
+    HalconCpp::GenEmptyObj(&display_obj);
+    HalconCpp::HTuple hv_display_raw_count;
+    HalconCpp::CountObj(result.regions, &hv_display_raw_count);
+    for (int i = 1; i <= static_cast<int>(hv_display_raw_count.I()); ++i)
+    {
+      HalconCpp::HObject one_region;
+      HalconCpp::HTuple area;
+      HalconCpp::HTuple row;
+      HalconCpp::HTuple col;
+      HalconCpp::SelectObj(result.regions, &one_region, i);
+      HalconCpp::AreaCenter(one_region, &area, &row, &col);
+      if (area.Length() > 0 && area[0].D() > 0.0)
+      {
+        HalconCpp::ConcatObj(display_obj, one_region, &display_obj);
+      }
+    }
+
+    HalconCpp::HTuple final_count;
+    HalconCpp::CountObj(display_obj, &final_count);
+    const int count_value = static_cast<int>(final_count.I());
+    const bool gate_pass = (count_value >= kGateMinCount && count_value <= kGateMaxCount);
+
+    HalconCpp::HTuple hv_w;
+    HalconCpp::HTuple hv_h;
+    HalconCpp::GetImageSize(result.image, &hv_w, &hv_h);
+    HalconCpp::SetPart(native_->window_handle, 0, 0, hv_h - 1, hv_w - 1);
+    HalconCpp::ClearWindow(native_->window_handle);
+    HalconCpp::DispObj(result.image, native_->window_handle);
+    HalconCpp::SetColor(native_->window_handle, "green");
+    HalconCpp::SetLineWidth(native_->window_handle, 2);
+    HalconCpp::SetDraw(native_->window_handle, "margin");
+    HalconCpp::DispObj(display_obj, native_->window_handle);
+
+    String^ gate_text = gate_pass ? "通过" : "不通过";
+    label_result_->Text =
+        String::Format("结果：识别到 {0} 个蓝色瓶盖\n耗时：{1} ms\nH:[{2},{3}] S>= {4} V>= {5}\nArea>= {6} Circ>= {7:F2}\n质量门控：{8}",
+                       count_value,
+                       result.elapsed_ms,
+                       track_h_low_->Value,
+                       track_h_high_->Value,
+                       track_s_low_->Value,
+                       track_v_low_->Value,
+                       track_min_area_->Value,
+                       track_min_circularity_->Value / 100.0,
+                       gate_text);
+
+    AppendDetectionLog(textbox_path_->Text->Trim(),
+                       count_value,
+                       result.elapsed_ms,
+                       result.adaptive_s_low_threshold,
+                       "OK",
+                       gate_pass);
   }
 
   void EnsureHalconWindow()
@@ -653,7 +779,12 @@ private:
     return System::IO::Path::Combine(GetLogDirectoryPath(), file_name);
   }
 
-  void AppendDetectionLog(int count, long long cost_time_ms, int current_s)
+  void AppendDetectionLog(String^ image_path,
+                          int count,
+                          long long cost_time_ms,
+                          int current_s,
+                          String^ error_code,
+                          bool gate_pass)
   {
     String^ log_dir = GetLogDirectoryPath();
     if (!System::IO::Directory::Exists(log_dir))
@@ -665,15 +796,26 @@ private:
     if (!System::IO::File::Exists(csv_path))
     {
       System::IO::File::AppendAllText(csv_path,
-                                      "时间,数量,耗时(ms),自适应S阈值\r\n",
+                                      "时间,图片路径,数量,耗时(ms),自适应S阈值,H下限,H上限,S下限,V下限,最小面积,最小圆度,错误码,算法版本,质量门控\r\n",
                                       System::Text::Encoding::UTF8);
     }
 
-    String^ line = String::Format("{0},{1},{2},{3}\r\n",
+    String^ safe_path = image_path == nullptr ? "" : image_path->Replace(",", " ");
+    String^ line = String::Format("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10:F2},{11},{12},{13}\r\n",
                                   DateTime::Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                                  safe_path,
                                   count,
                                   cost_time_ms,
-                                  current_s);
+                                  current_s,
+                                  track_h_low_->Value,
+                                  track_h_high_->Value,
+                                  track_s_low_->Value,
+                                  track_v_low_->Value,
+                                  track_min_area_->Value,
+                                  track_min_circularity_->Value / 100.0,
+                                  error_code,
+                                  kAlgoVersion,
+                                  gate_pass ? "PASS" : "FAIL");
     System::IO::File::AppendAllText(csv_path, line, System::Text::Encoding::UTF8);
   }
 
