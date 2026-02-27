@@ -1,0 +1,41 @@
+# Visual Studio / C++
+.vs/
+**/Debug/
+**/Release/
+**/x64/
+**/x86/
+**/obj/
+**/ipch/
+**/*.user
+**/*.suo
+**/*.VC.db
+**/*.VC.opendb
+**/*.aps
+**/*.ilk
+**/*.pdb
+**/*.idb
+**/*.exp
+**/*.lib
+**/*.tlog/
+
+# NuGet / MSBuild cache
+**/packages/
+**/*.nuget.dgspec.json
+**/project.assets.json
+**/project.nuget.cache
+
+# Build outputs
+*.exe
+*.dll
+*.metagen
+*.recipe
+
+# HALCON temp / logs (if any)
+*.log
+
+# Keep runtime report csv out of repo
+Log/
+
+# OS
+Thumbs.db
+.DS_Store
